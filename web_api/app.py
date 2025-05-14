@@ -49,6 +49,14 @@ def json_md_dump(
         path=f"{pdf_name}.md"
     )
 
+@app.get("/", status_code=200, summary="回傳確認伺服器活著.")
+def root():
+    """
+    回傳確認伺服器活著.
+    """
+    return {'msg': 'server is ready'}
+
+
 @app.post("/pdf_parse", tags=["projects"], summary="Parse PDF file")
 async def pdf_parse_main(
         pdf_file: UploadFile = File(...),
