@@ -17,7 +17,7 @@ RUN apt-get -q update \
     apt-utils \
     bats \
     build-essential
-RUN apt-get update && apt-get install -y vim net-tools procps lsof curl wget iputils-ping telnet lrzsz git
+RUN apt-get update && apt-get install -y tzdata vim net-tools procps lsof curl wget iputils-ping telnet lrzsz git
 
 RUN apt-get update && \
     apt-get install -y \
@@ -35,6 +35,9 @@ RUN apt-get update && \
     && rm -rf /var/lib/apt/lists/*
 
 # RUN unset http_proxy && unset https_proxy
+# change timezone.
+RUN ln -fs /usr/share/zoneinfo/Asia/Taipei /etc/localtime
+RUN dpkg-reconfigure -f noninteractive tzdata
 
 # Set Python 3.10 as the default python3
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1
