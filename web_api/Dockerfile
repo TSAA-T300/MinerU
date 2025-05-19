@@ -93,7 +93,7 @@ WORKDIR /root
 # Set the entry point to activate the virtual environment and run the command line tool
 # ENTRYPOINT ["/bin/bash", "-c", "source /opt/mineru_venv/bin/activate && exec \"$@\" && python3 app.py", "--"]
 # dumb-init
-+RUN wget -O /usr/local/bin/dumb-init https://github.com/Yelp/dumb-init/releases/download/v1.2.5/dumb-init_1.2.5_x86_64 && chmod +x /usr/local/bin/dumb-init && ln -s /usr/local/bin/dumb-init /usr/bin/dumb-init
+RUN wget -O /usr/local/bin/dumb-init https://github.com/Yelp/dumb-init/releases/download/v1.2.5/dumb-init_1.2.5_x86_64 && chmod +x /usr/local/bin/dumb-init && ln -s /usr/local/bin/dumb-init /usr/bin/dumb-init
 
 # Expose the port that FastAPI will run on
 EXPOSE 8000
