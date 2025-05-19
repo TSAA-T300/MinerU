@@ -79,6 +79,7 @@ RUN sed -i "s/formula: True/formula: False/g" /opt/mineru_venv/lib/python3.10/si
 
 # Copy the configuration file template and set up the model directory
 COPY magic-pdf.json /root/magic-pdf.json
+COPY docker-entrypoint.sh /root/docker-entrypoint.sh
 ADD app.py /root/app.py
 
 WORKDIR /root
@@ -91,10 +92,10 @@ WORKDIR /root
 
 # Set the entry point to activate the virtual environment and run the command line tool
 # ENTRYPOINT ["/bin/bash", "-c", "source /opt/mineru_venv/bin/activate && exec \"$@\" && python3 app.py", "--"]
-
+# dumb-init
++RUN wget -O /usr/local/bin/dumb-init https://github.com/Yelp/dumb-init/releases/download/v1.2.5/dumb-init_1.2.5_x86_64 && chmod +x /usr/local/bin/dumb-init && ln -s /usr/local/bin/dumb-init /usr/bin/dumb-init
 
 # Expose the port that FastAPI will run on
 EXPOSE 8000
 
-# Command to run FastAPI using Uvicorn, pointing to app.py and binding to 0.0.0.0:8000
-CMD ["/bin/bash", "-c", "source /opt/mineru_venv/bin/activate && uvicorn app:app --host 0.0.0.0 --port 8000"]
+ENTRYPOINT ["/usr/bin/dumb-init", "--", "bash", "docker-entrypoint.sh"]
