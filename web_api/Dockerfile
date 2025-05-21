@@ -95,6 +95,10 @@ WORKDIR /root
 # dumb-init
 RUN wget -O /usr/local/bin/dumb-init https://github.com/Yelp/dumb-init/releases/download/v1.2.5/dumb-init_1.2.5_x86_64 && chmod +x /usr/local/bin/dumb-init && ln -s /usr/local/bin/dumb-init /usr/bin/dumb-init
 
+# 於環境變數設定 image name, 為了使 health check 可以回傳 version
+ARG IMAGE_NAME
+ENV IMAGE_NAME=${IMAGE_NAME}
+
 # Expose the port that FastAPI will run on
 EXPOSE 8000
 
