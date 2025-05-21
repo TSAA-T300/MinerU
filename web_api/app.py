@@ -54,7 +54,7 @@ def root():
     """
     回傳確認伺服器活著.
     """
-    return {'msg': 'server is ready'}
+    return {'msg': 'server is ready', 'version': os.getenv("IMAGE_NAME", "unknown")}
 
 
 @app.post("/pdf_parse", tags=["projects"], summary="Parse PDF file")
