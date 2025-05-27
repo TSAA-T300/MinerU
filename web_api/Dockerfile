@@ -1,4 +1,3 @@
-# Use the official Ubuntu base image
 FROM python:3.10.15-bullseye
 
 # ENV http_proxy http://127.0.0.1:7890
