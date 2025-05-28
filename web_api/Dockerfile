@@ -1,5 +1,4 @@
-# Use the official Ubuntu base image
-FROM ubuntu:22.04
+FROM python:3.10.15-bullseye
 
 # ENV http_proxy http://127.0.0.1:7890
 # ENV https_proxy http://127.0.0.1:7890
@@ -21,13 +20,7 @@ RUN apt-get update && apt-get install -y tzdata vim net-tools procps lsof curl w
 
 RUN apt-get update && \
     apt-get install -y \
-    software-properties-common && \
-    apt-get update && \
-    apt-get install -y \
-    python3.10 \
-    python3.10-venv \
-    python3.10-distutils \
-    python3-pip \
+    software-properties-common \
     wget \
     git \
     libgl1 \
@@ -39,8 +32,6 @@ RUN apt-get update && \
 RUN ln -fs /usr/share/zoneinfo/Asia/Taipei /etc/localtime
 RUN dpkg-reconfigure -f noninteractive tzdata
 
-# Set Python 3.10 as the default python3
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1
 # Create a virtual environment for MinerU
 RUN python3 -m venv /opt/mineru_venv
 

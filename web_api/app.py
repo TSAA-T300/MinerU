@@ -2,68 +2,123 @@ import copy
 import json
 import os
 from tempfile import NamedTemporaryFile
+from typing import List
 
-import magic_pdf.model as model_config
 import uvicorn
-from fastapi import FastAPI, File, UploadFile, Form
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from loguru import logger
+from paddleocr import PaddleOCR
+
+import magic_pdf.model as model_config
 from magic_pdf.pipe.OCRPipe import OCRPipe
 from magic_pdf.pipe.TXTPipe import TXTPipe
 from magic_pdf.pipe.UNIPipe import UNIPipe
 from magic_pdf.rw.DiskReaderWriter import DiskReaderWriter
 
+
+class CustomPaddleOCR(PaddleOCR):
+    def image_ocr(self, image_bytes: bytes) -> List[str]:
+        results = self.ocr(image_bytes, cls=True)
+        if results[0] is None:
+            return []
+        output = list()
+        for idx in range(len(results)):
+            res = results[idx]
+            for _, line in res:
+                word, _ = line
+                output.append(word)
+        return output
+
+
 model_config.__use_inside_model__ = True
 
 app = FastAPI()
+ocr_model = CustomPaddleOCR(use_angle_cls=True, lang="ch", show_log=False)
+
 
 def json_md_dump(
-        pipe,
-        md_writer,
-        pdf_name,
-        content_list,
-        md_content,
+    pipe,
+    md_writer,
+    pdf_name,
+    content_list,
+    md_content,
 ):
     # Write model results to model.json
     orig_model_list = copy.deepcopy(pipe.model_list)
     md_writer.write(
         content=json.dumps(orig_model_list, ensure_ascii=False, indent=4),
-        path=f"{pdf_name}_model.json"
+        path=f"{pdf_name}_model.json",
     )
 
     # Write intermediate results to middle.json
     md_writer.write(
         content=json.dumps(pipe.pdf_mid_data, ensure_ascii=False, indent=4),
-        path=f"{pdf_name}_middle.json"
+        path=f"{pdf_name}_middle.json",
     )
 
     # Write text content results to content_list.json
     md_writer.write(
         content=json.dumps(content_list, ensure_ascii=False, indent=4),
-        path=f"{pdf_name}_content_list.json"
+        path=f"{pdf_name}_content_list.json",
     )
 
     # Write results to .md file
-    md_writer.write(
-        content=md_content,
-        path=f"{pdf_name}.md"
-    )
+    md_writer.write(content=md_content, path=f"{pdf_name}.md")
+
 
 @app.get("/", status_code=200, summary="回傳確認伺服器活著.")
 def root():
     """
     回傳確認伺服器活著.
     """
-    return {'msg': 'server is ready', 'version': os.getenv("IMAGE_NAME", "unknown")}
+    return {"msg": "server is ready", "version": os.getenv("IMAGE_NAME", "unknown")}
+
+
+@app.post("/ocr", tags=["projects"], summary="Do Image OCR")
+async def ocr_endpoint(image_file: UploadFile = File(...)):
+    """接收上傳圖片並進行文字辨識 (OCR)
+    Args:
+        image_file (UploadFile): 上傳的圖片檔案。
+
+    Returns:
+        JSONResponse: 若成功則回傳辨識結果（List[str]）；若失敗則回傳錯誤訊息與 HTTP 500。
+    """
+    allowed_exts = {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".bmp",
+        ".dib",
+        ".webp",
+        ".tif",
+        ".tiff",
+    }
+    filename = image_file.filename.lower()
+    if not any(filename.endswith(ext) for ext in allowed_exts):
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type. Only image formats are accepted.",
+        )
+    try:
+        # 將 UploadFile 的內容讀取為 bytes
+        image_bytes = await image_file.read()
+        result = ocr_model.image_ocr(image_bytes)
+        return JSONResponse(
+            content={"status": "success", "result": result}, status_code=200
+        )
+    except Exception as e:
+        logger.exception(e)
+        return JSONResponse(content={"status": "error"}, status_code=500)
 
 
 @app.post("/pdf_parse", tags=["projects"], summary="Parse PDF file")
 async def pdf_parse_main(
-        pdf_file: UploadFile = File(...),
-        parse_method: str = 'auto',
-        model_json_path: str = None,
-        is_json_md_dump: bool = True,
-        output_dir: str = "output"
+    pdf_file: UploadFile = File(...),
+    parse_method: str = "auto",
+    model_json_path: str = None,
+    is_json_md_dump: bool = True,
+    output_dir: str = "output",
 ):
     """
     Execute the process of converting PDF to JSON and MD, outputting MD and JSON files to the specified directory
@@ -86,7 +141,7 @@ async def pdf_parse_main(
         else:
             output_path = os.path.join(os.path.dirname(temp_pdf_path), pdf_name)
 
-        output_image_path = os.path.join(output_path, 'images')
+        output_image_path = os.path.join(output_path, "images")
 
         # Get parent path of images for relative path in .md and content_list.json
         image_path_parent = os.path.basename(output_image_path)
@@ -100,7 +155,9 @@ async def pdf_parse_main(
             model_json = []
 
         # Execute parsing steps
-        image_writer, md_writer = DiskReaderWriter(output_image_path), DiskReaderWriter(output_path)
+        image_writer, md_writer = DiskReaderWriter(output_image_path), DiskReaderWriter(
+            output_path
+        )
 
         # Choose parsing method
         if parse_method == "auto":
@@ -112,7 +169,9 @@ async def pdf_parse_main(
             pipe = OCRPipe(pdf_bytes, model_json, image_writer)
         else:
             logger.error("Unknown parse method, only auto, ocr, txt allowed")
-            return JSONResponse(content={"error": "Invalid parse method"}, status_code=400)
+            return JSONResponse(
+                content={"error": "Invalid parse method"}, status_code=400
+            )
 
         # Execute classification
         pipe.pipe_classify()
@@ -123,7 +182,9 @@ async def pdf_parse_main(
                 pipe.pipe_analyze()  # Parse
             else:
                 logger.error("Need model list input")
-                return JSONResponse(content={"error": "Model list input required"}, status_code=400)
+                return JSONResponse(
+                    content={"error": "Model list input required"}, status_code=400
+                )
 
         # Execute parsing
         pipe.pipe_parse()
@@ -134,7 +195,12 @@ async def pdf_parse_main(
 
         if is_json_md_dump:
             json_md_dump(pipe, md_writer, pdf_name, content_list, md_content)
-        data = {"layout": copy.deepcopy(pipe.model_list), "info": pipe.pdf_mid_data, "content_list": content_list,'md_content':md_content}
+        data = {
+            "layout": copy.deepcopy(pipe.model_list),
+            "info": pipe.pdf_mid_data,
+            "content_list": content_list,
+            "md_content": md_content,
+        }
         return JSONResponse(data, status_code=200)
 
     except Exception as e:
@@ -142,8 +208,9 @@ async def pdf_parse_main(
         return JSONResponse(content={"error": str(e)}, status_code=500)
     finally:
         # Clean up the temporary file
-        if 'temp_pdf_path' in locals():
+        if "temp_pdf_path" in locals():
             os.unlink(temp_pdf_path)
+
 
 # if __name__ == '__main__':
 #     uvicorn.run(app, host="0.0.0.0", port=8888)
