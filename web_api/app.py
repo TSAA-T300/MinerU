@@ -2,15 +2,18 @@ import copy
 import json
 import os
 from tempfile import NamedTemporaryFile
-from typing import List
+from typing import List, Optional
 
 import uvicorn
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse
 from loguru import logger
 from paddleocr import PaddleOCR
 
 import magic_pdf.model as model_config
+from magic_pdf.dict2md.ocr_mkcontent import union_make
+from magic_pdf.libs.json_compressor import JsonCompressor
+from magic_pdf.libs.MakeContentConfig import DropMode, MakeMode
 from magic_pdf.pipe.OCRPipe import OCRPipe
 from magic_pdf.pipe.TXTPipe import TXTPipe
 from magic_pdf.pipe.UNIPipe import UNIPipe
@@ -107,6 +110,47 @@ async def ocr_endpoint(image_file: UploadFile = File(...)):
         return JSONResponse(
             content={"status": "success", "result": result}, status_code=200
         )
+    except Exception as e:
+        logger.exception(e)
+        return JSONResponse(content={"status": "error"}, status_code=500)
+
+
+@app.post("/md_dump", tags=["projects"], summary="Markdown content processing")
+async def md_dump(
+    pdf_mid_info_data: dict = Body(..., description="MinerU 每一頁 pdf 的解析結果"),
+    md_name: Optional[str] = Query(None, description="Markdown 檔案名稱"),
+    output_path: Optional[str] = Query(
+        None, description="輸出路徑，若為 None 則不輸出"
+    ),
+    image_path_parent: str = Query("/", description="markdown 裡的圖片路徑前綴"),
+):
+    """
+    pdf_mid_info_data 的格式詳見: https://github.com/TSAA-T300/MinerU/blob/master/docs/output_file_zh_cn.md
+    """
+
+    def mk_markdown(
+        compressed_pdf_mid_data: str,
+        img_buket_path: str,
+        drop_mode="none",
+        md_make_mode=MakeMode.MM_MD,
+    ) -> list:
+        """此方法複製於 AbsPipe 的 mk_markdown"""
+        pdf_mid_data = JsonCompressor.decompress_json(compressed_pdf_mid_data)
+        pdf_info_list = pdf_mid_data["pdf_info"]
+        md_content = union_make(pdf_info_list, md_make_mode, drop_mode, img_buket_path)
+        return md_content
+
+    try:
+        md_content = mk_markdown(
+            JsonCompressor.compress_json(pdf_mid_info_data), image_path_parent
+        )
+        # Write results to .md file
+        if output_path and md_name:
+            output_path = os.path.abspath(os.path.join("/root/output", output_path))
+            md_writer = DiskReaderWriter(output_path)
+            md_writer.write(content=md_content, path=f"{md_name}.md")
+
+        return JSONResponse(content={"status": "success", "result": md_content})
     except Exception as e:
         logger.exception(e)
         return JSONResponse(content={"status": "error"}, status_code=500)
