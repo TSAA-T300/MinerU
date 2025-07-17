@@ -2,7 +2,7 @@
 
 PADDLE_MODE="${PADDLE_MODE:-cpu}"
 # web_api更新時請更新這邊的日期版本部分
-VERSION="0.8.1-paddle-${PADDLE_MODE}-20250528-01"
+VERSION="0.8.1-paddle-${PADDLE_MODE}-20250717-01"
 IMAGE_NAME="t300/mineru:${VERSION}"
 
 echo "building $IMAGE_NAME..."
