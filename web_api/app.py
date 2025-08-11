@@ -5,7 +5,7 @@ from tempfile import NamedTemporaryFile
 from typing import List, Optional
 
 import uvicorn
-from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile, Form
 from fastapi.responses import JSONResponse
 from loguru import logger
 from paddleocr import PaddleOCR
@@ -21,8 +21,27 @@ from magic_pdf.rw.DiskReaderWriter import DiskReaderWriter
 
 
 class CustomPaddleOCR(PaddleOCR):
-    def image_ocr(self, image_bytes: bytes) -> List[str]:
-        results = self.ocr(image_bytes, cls=True)
+    def image_ocr(
+        self,
+        image_bytes: bytes,
+        use_slice: bool,
+        horizontal_stride: int,
+        vertical_stride: int,
+        merge_x_thres: int,
+        merge_y_thres: int,
+    ) -> List[str]:
+
+        kwargs = {"cls": True}
+        if use_slice:
+            kwargs["slice"] = {
+                "horizontal_stride": horizontal_stride,
+                "vertical_stride": vertical_stride,
+                "merge_x_thres": merge_x_thres,
+                "merge_y_thres": merge_y_thres,
+            }
+
+        results = self.ocr(image_bytes, **kwargs)
+
         if results[0] is None:
             return []
         output = list()
@@ -79,10 +98,32 @@ def root():
 
 
 @app.post("/ocr", tags=["projects"], summary="Do Image OCR")
-async def ocr_endpoint(image_file: UploadFile = File(...)):
-    """接收上傳圖片並進行文字辨識 (OCR)
+async def ocr_endpoint(
+    image_file: UploadFile = File(...),
+    use_slice: bool = Form(
+        True,
+        description="是否要進行切片操作，參考：https://github.com/PaddlePaddle/PaddleOCR/blob/v3.1.0/docs/version2.x/ppocr/blog/slice.md",
+    ),
+    horizontal_stride: int = Form(
+        300, description="切片y軸步幅，當use_slice=true時生效"
+    ),
+    vertical_stride: int = Form(500, description="切片x軸步幅，當use_slice=true時生效"),
+    merge_x_thres: int = Form(
+        50, description="切片x軸合併門檻，當use_slice=true時生效"
+    ),
+    merge_y_thres: int = Form(
+        35, description="切片y軸合併門檻，當use_slice=true時生效"
+    ),
+):
+    """接收上傳圖片並進行文字辨識 (OCR)，可選擇是否使用切片(slice)模式以提升大圖的辨識效率。
+
     Args:
         image_file (UploadFile): 上傳的圖片檔案。
+        use_slice (bool): 是否啟用圖片切片模式。若為True，會將大圖切成多片分別辨識，再合併結果。預設為True。
+        horizontal_stride (int): 切片時水平方向（y軸）的步幅，影響切片重疊與數量，use_slice=True時生效。預設300。
+        vertical_stride (int): 切片時垂直方向（x軸）的步幅，影響切片重疊與數量，use_slice=True時生效。預設500。
+        merge_x_thres (int): 切片結果合併時，x軸方向合併文字區塊的閾值，use_slice=True時生效。預設50。
+        merge_y_thres (int): 切片結果合併時，y軸方向合併文字區塊的閾值，use_slice=True時生效。預設35。
 
     Returns:
         JSONResponse: 若成功則回傳辨識結果（List[str]）；若失敗則回傳錯誤訊息與 HTTP 500。
@@ -106,7 +147,14 @@ async def ocr_endpoint(image_file: UploadFile = File(...)):
     try:
         # 將 UploadFile 的內容讀取為 bytes
         image_bytes = await image_file.read()
-        result = ocr_model.image_ocr(image_bytes)
+        result = ocr_model.image_ocr(
+            image_bytes,
+            use_slice,
+            horizontal_stride,
+            vertical_stride,
+            merge_x_thres,
+            merge_y_thres,
+        )
         return JSONResponse(
             content={"status": "success", "result": result}, status_code=200
         )
