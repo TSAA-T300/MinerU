@@ -47,7 +47,7 @@ RUN /bin/bash -c "source /opt/mineru_venv/bin/activate && \
     uvicorn \
     python-multipart \
     ultralytics==8.3.39 \
-    paddleocr==2.10.0" \
+    paddleocr==2.10.0 \
     paddlepaddle==2.5.2 \
     struct-eqtable==0.1.0 \
     unimernet==0.1.6 \
