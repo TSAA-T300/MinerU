@@ -5,7 +5,7 @@ from tempfile import NamedTemporaryFile
 from typing import List, Optional
 
 import uvicorn
-from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile, Form
+from fastapi import Body, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse
 from loguru import logger
 from paddleocr import PaddleOCR
@@ -40,7 +40,29 @@ class CustomPaddleOCR(PaddleOCR):
                 "merge_y_thres": merge_y_thres,
             }
 
-        results = self.ocr(image_bytes, **kwargs)
+        try:
+            results = self.ocr(image_bytes, **kwargs)
+        except Exception as e:
+            if use_slice:
+                """
+                若是在use_slice=true的狀況下發生錯誤，可能是以下bug導致，若切成多個slice但都完全沒有文字框，則會噴錯
+                這種情況就改用無slice再跑一次當作最後結果.
+
+                ```
+                File "/opt/mineru_venv/lib/python3.10/site-packages/paddleocr/tools/infer/predict_system.py", line 100, in __call__
+                dt_boxes = np.concatenate(dt_slice_boxes)
+                ```
+                """
+
+                logger.info(
+                    "使用slice=true無法擷取OCR文字，將改用slice=false再試一次..."
+                )
+                results = self.ocr(image_bytes, cls=True)
+                logger.info(
+                    "使用slice=true無法擷取OCR文字，將改用slice=false再試一次...[成功]"
+                )
+            else:
+                raise e
 
         if results[0] is None:
             return []
