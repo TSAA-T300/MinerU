@@ -1,6 +1,8 @@
 import copy
 import json
 import os
+import signal
+import subprocess
 from tempfile import NamedTemporaryFile
 from typing import List, Optional
 
@@ -39,6 +41,53 @@ model_config.__use_inside_model__ = True
 app = FastAPI()
 ocr_model = CustomPaddleOCR(use_angle_cls=True, lang="ch", show_log=False)
 
+def _get_max_vram_mb() -> int:
+    raw = os.getenv("VRAM_MAX_MB", "").strip()
+    if not raw:
+        raise HTTPException(status_code=500, detail="VRAM_MAX_MB is not set")
+    try:
+        max_vram_mb = int(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail="VRAM_MAX_MB must be an integer") from exc
+    if max_vram_mb <= 0:
+        raise HTTPException(status_code=500, detail="VRAM_MAX_MB must be > 0")
+    return max_vram_mb
+
+
+def _query_vram_mb_for_pid(pid: int) -> Optional[int]:
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid,used_memory",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except FileNotFoundError:
+        logger.warning("nvidia-smi not found; VRAM monitor disabled")
+        return None
+    except subprocess.CalledProcessError as exc:
+        logger.warning("nvidia-smi failed: {}", exc)
+        return None
+
+    used_mb = 0
+    for line in result.stdout.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 2:
+            continue
+        try:
+            line_pid = int(parts[0])
+            line_used = int(parts[1])
+        except ValueError:
+            continue
+        if line_pid == pid:
+            used_mb += line_used
+    return used_mb
+
+
 
 def json_md_dump(
     pipe,
@@ -76,6 +125,39 @@ def root():
     回傳確認伺服器活著.
     """
     return {"msg": "server is ready", "version": os.getenv("IMAGE_NAME", "unknown")}
+
+
+@app.post("/vram_check", tags=["projects"], summary="Check VRAM usage")
+async def vram_check():
+    max_vram_mb = _get_max_vram_mb()
+    used_mb = _query_vram_mb_for_pid(os.getpid())
+    if used_mb is None:
+        return JSONResponse(
+            content={"status": "error", "detail": "nvidia-smi not available"},
+            status_code=503,
+        )
+
+    exceeded = used_mb > max_vram_mb
+    if exceeded:
+        logger.error(
+            "VRAM usage exceeded limit: used={}MB, limit={}MB. Stopping container.",
+            used_mb,
+            max_vram_mb,
+        )
+        try:
+            os.kill(os.getpid(), signal.SIGTERM)
+        except ProcessLookupError:
+            logger.warning("Process already exited before SIGTERM")
+
+    return JSONResponse(
+        content={
+            "status": "ok",
+            "used_mb": used_mb,
+            "max_vram_mb": max_vram_mb,
+            "exceeded": exceeded,
+        },
+        status_code=200,
+    )
 
 
 @app.post("/ocr", tags=["projects"], summary="Do Image OCR")
