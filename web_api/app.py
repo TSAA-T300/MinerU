@@ -1,13 +1,23 @@
 import copy
 import json
 import os
+import shutil
 import signal
 import subprocess
+import time
 from tempfile import NamedTemporaryFile
 from typing import List, Optional
 
 import uvicorn
-from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import (
+    BackgroundTasks,
+    Body,
+    FastAPI,
+    File,
+    HTTPException,
+    Query,
+    UploadFile,
+)
 from fastapi.responses import JSONResponse
 from loguru import logger
 from paddleocr import PaddleOCR
@@ -15,7 +25,7 @@ from paddleocr import PaddleOCR
 import magic_pdf.model as model_config
 from magic_pdf.dict2md.ocr_mkcontent import union_make
 from magic_pdf.libs.json_compressor import JsonCompressor
-from magic_pdf.libs.MakeContentConfig import DropMode, MakeMode
+from magic_pdf.libs.MakeContentConfig import MakeMode
 from magic_pdf.pipe.OCRPipe import OCRPipe
 from magic_pdf.pipe.TXTPipe import TXTPipe
 from magic_pdf.pipe.UNIPipe import UNIPipe
@@ -41,20 +51,33 @@ model_config.__use_inside_model__ = True
 app = FastAPI()
 ocr_model = CustomPaddleOCR(use_angle_cls=True, lang="ch", show_log=False)
 
+
+# VRAM Check
 def _get_max_vram_mb() -> int:
-    raw = os.getenv("VRAM_MAX_MB", "").strip()
-    if not raw:
-        raise HTTPException(status_code=500, detail="VRAM_MAX_MB is not set")
-    try:
-        max_vram_mb = int(raw)
-    except ValueError as exc:
-        raise HTTPException(status_code=500, detail="VRAM_MAX_MB must be an integer") from exc
+    raw = os.getenv("VRAM_MAX_MB", "78000").strip()
+    max_vram_mb = int(raw)
     if max_vram_mb <= 0:
         raise HTTPException(status_code=500, detail="VRAM_MAX_MB must be > 0")
     return max_vram_mb
 
 
-def _query_vram_mb_for_pid(pid: int) -> Optional[int]:
+def _query_vram_mb_for_pid_rocm(pid: int) -> Optional[int]:
+    logger.warning("rocm-smi 暫不支援，尚未啟用 AMD VRAM 判斷")
+    return None
+
+
+def _detect_gpu_device() -> str:
+    gpu_device = os.getenv("GPU_DEVICE", "").strip().lower()
+    if gpu_device in {"nvidia", "amd"}:
+        return gpu_device
+    if shutil.which("nvidia-smi"):
+        return "nvidia"
+    if shutil.which("rocm-smi"):
+        return "amd"
+    return "unknown"
+
+
+def _query_vram_mb_for_pid_nvidia(pid: int) -> Optional[int]:
     try:
         result = subprocess.run(
             [
@@ -66,9 +89,6 @@ def _query_vram_mb_for_pid(pid: int) -> Optional[int]:
             text=True,
             check=True,
         )
-    except FileNotFoundError:
-        logger.warning("nvidia-smi not found; VRAM monitor disabled")
-        return None
     except subprocess.CalledProcessError as exc:
         logger.warning("nvidia-smi failed: {}", exc)
         return None
@@ -87,6 +107,24 @@ def _query_vram_mb_for_pid(pid: int) -> Optional[int]:
             used_mb += line_used
     return used_mb
 
+
+def _query_vram_mb_for_pid(pid: int) -> Optional[int]:
+    device = _detect_gpu_device()
+    if device == "nvidia":
+        return _query_vram_mb_for_pid_nvidia(pid)
+    elif device == "amd":
+        return _query_vram_mb_for_pid_rocm(pid)
+    else:
+        logger.warning("Unsupported GPU device or tools not found")
+        return None
+
+
+def _terminate_after_delay(pid: int, delay_s: float = 0.5):
+    time.sleep(delay_s)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        logger.warning("Process already exited before SIGTERM")
 
 
 def json_md_dump(
@@ -127,27 +165,25 @@ def root():
     return {"msg": "server is ready", "version": os.getenv("IMAGE_NAME", "unknown")}
 
 
-@app.post("/vram_check", tags=["projects"], summary="Check VRAM usage")
-async def vram_check():
+@app.get("/vram_check", tags=["projects"], summary="Check VRAM usage")
+async def vram_check(background_tasks: BackgroundTasks):
+    pid = os.getpid()
+    logger.info(f"PID={pid}")
     max_vram_mb = _get_max_vram_mb()
-    used_mb = _query_vram_mb_for_pid(os.getpid())
+    used_mb = _query_vram_mb_for_pid(pid)
     if used_mb is None:
         return JSONResponse(
-            content={"status": "error", "detail": "nvidia-smi not available"},
+            content={"status": "error", "detail": "nvidia-smi/rocm-smi not available"},
             status_code=503,
         )
-
     exceeded = used_mb > max_vram_mb
     if exceeded:
         logger.error(
-            "VRAM usage exceeded limit: used={}MB, limit={}MB. Stopping container.",
+            "VRAM usage exceeded limit: used=%sMB, limit=%sMB. Terminating process after response.",
             used_mb,
             max_vram_mb,
         )
-        try:
-            os.kill(os.getpid(), signal.SIGTERM)
-        except ProcessLookupError:
-            logger.warning("Process already exited before SIGTERM")
+        background_tasks.add_task(_terminate_after_delay, pid, 0.5)
 
     return JSONResponse(
         content={
@@ -338,5 +374,6 @@ async def pdf_parse_main(
             os.unlink(temp_pdf_path)
 
 
-# if __name__ == '__main__':
+
+# if __name__ == "__main__":
 #     uvicorn.run(app, host="0.0.0.0", port=8888)
