@@ -25,6 +25,5 @@ services:
         HTTPS_PROXY: ""
         BASE_DIR: /data/knowledges
         NVIDIA_VISIBLE_DEVICES: ${CONVERTER_CUDA_VISIBLE_DEVICES}
-        VRAM_MAX_MB: ${VRAM_MAX_MB}
       restart: unless-stopped
       runtime: ${CONVERTER_RUNTIME}
