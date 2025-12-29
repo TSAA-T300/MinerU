@@ -57,7 +57,7 @@ def _get_max_vram_mb() -> int:
     raw = os.getenv("VRAM_MAX_MB", "78000").strip()
     max_vram_mb = int(raw)
     if max_vram_mb <= 0:
-        raise HTTPException(status_code=500, detail="VRAM_MAX_MB must be > 0")
+        raise ValueError("VRAM_MAX_MB must be > 0")
     return max_vram_mb
 
 
@@ -165,35 +165,24 @@ def root():
     return {"msg": "server is ready", "version": os.getenv("IMAGE_NAME", "unknown")}
 
 
-@app.get("/vram_check", tags=["projects"], summary="Check VRAM usage")
-async def vram_check(background_tasks: BackgroundTasks):
+def vram_check(background_tasks) -> Optional[JSONResponse]:
     pid = os.getpid()
-    logger.info(f"PID={pid}")
     max_vram_mb = _get_max_vram_mb()
     used_mb = _query_vram_mb_for_pid(pid)
-    if used_mb is None:
-        return JSONResponse(
-            content={"status": "error", "detail": "nvidia-smi/rocm-smi not available"},
-            status_code=503,
-        )
-    exceeded = used_mb > max_vram_mb
-    if exceeded:
+    if not used_mb:
+        return None
+    is_vram_exceeded = used_mb > max_vram_mb
+    logger.info(f"Current PID={pid}, used_mb={used_mb}, max_vram_mb={max_vram_mb}")
+    if is_vram_exceeded:
         logger.error(
-            "VRAM usage exceeded limit: used=%sMB, limit=%sMB. Terminating process after response.",
-            used_mb,
-            max_vram_mb,
+            "VRAM usage exceeded limit. The process will be terminated shortly."
         )
         background_tasks.add_task(_terminate_after_delay, pid, 0.5)
-
-    return JSONResponse(
-        content={
-            "status": "ok",
-            "used_mb": used_mb,
-            "max_vram_mb": max_vram_mb,
-            "exceeded": exceeded,
-        },
-        status_code=200,
-    )
+    return {
+        "is_vram_exceeded": is_vram_exceeded,
+        "used_mb": used_mb,
+        "max_vram_mb": max_vram_mb,
+    }
 
 
 @app.post("/ocr", tags=["projects"], summary="Do Image OCR")
@@ -276,6 +265,7 @@ async def md_dump(
 
 @app.post("/pdf_parse", tags=["projects"], summary="Parse PDF file")
 async def pdf_parse_main(
+    background_tasks: BackgroundTasks,
     pdf_file: UploadFile = File(...),
     parse_method: str = "auto",
     model_json_path: str = None,
@@ -291,6 +281,15 @@ async def pdf_parse_main(
     :param output_dir: Output directory for results. A folder named after the PDF file will be created to store all results
     """
     try:
+        # 確認VRAM是否足夠，如果超過限制則KILL此Process
+        vram_result = vram_check(background_tasks)
+        if vram_result and vram_result["is_vram_exceeded"]:
+            return JSONResponse(
+                content={
+                    "error": "GPU VRAM exceeded limit, Please retry later",
+                },
+                status_code=503,
+            )
         # Create a temporary file to store the uploaded PDF
         with NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
             temp_pdf.write(await pdf_file.read())
@@ -372,7 +371,6 @@ async def pdf_parse_main(
         # Clean up the temporary file
         if "temp_pdf_path" in locals():
             os.unlink(temp_pdf_path)
-
 
 
 # if __name__ == "__main__":
