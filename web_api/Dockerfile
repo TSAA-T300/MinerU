@@ -35,13 +35,19 @@ RUN dpkg-reconfigure -f noninteractive tzdata
 # Create a virtual environment for MinerU
 RUN python3 -m venv /opt/mineru_venv
 
+# 注意：因為paddleocr 2.8 之後才支援 `slice` 且3.x 尚不支援 `slice`，因此目前安裝最新版本的2.x(即2.10.0)
+# Ref: 
+#   - slice 功能 PR: https://github.com/PaddlePaddle/PaddleOCR/pull/12152/files
+#   - 3.x 版本後，OCR入口變了，原本的很多參數都不能用，包含slice
+#       - 新入口：https://github.com/PaddlePaddle/PaddleOCR/blob/4a8aa277f331b22d2eeb86f60adc766149c05c1d/paddleocr/_pipelines/ocr.py#L194
+#       - 舊入口：https://github.com/PaddlePaddle/PaddleOCR/blob/v2.8.0/paddleocr.py#L674
 RUN /bin/bash -c "source /opt/mineru_venv/bin/activate && \
     pip install --upgrade pip && \
     pip install fastapi \
     uvicorn \
     python-multipart \
     ultralytics==8.3.39 \
-    paddleocr==2.7.3 \
+    paddleocr==2.10.0 \
     paddlepaddle==2.5.2 \
     struct-eqtable==0.1.0 \
     unimernet==0.1.6 \
