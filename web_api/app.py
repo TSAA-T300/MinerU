@@ -95,7 +95,7 @@ ocr_model = CustomPaddleOCR(use_angle_cls=True, lang="ch", show_log=False)
 
 # VRAM Check
 def _get_max_vram_mb() -> int:
-    raw = os.getenv("VRAM_MAX_MB", "78000").strip()
+    raw = os.getenv("VRAM_MAX_MB", "10000").strip()
     max_vram_mb = int(raw)
     if max_vram_mb <= 0:
         raise ValueError("VRAM_MAX_MB must be > 0")
@@ -206,7 +206,7 @@ def root():
     return {"msg": "server is ready", "version": os.getenv("IMAGE_NAME", "unknown")}
 
 
-def vram_check(background_tasks) -> Optional[JSONResponse]:
+def vram_check(background_tasks) -> Optional[dict]:
     pid = os.getpid()
     max_vram_mb = _get_max_vram_mb()
     used_mb = _query_vram_mb_for_pid(pid)
