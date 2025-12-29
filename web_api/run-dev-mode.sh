@@ -1,6 +1,5 @@
 #!/bin/bash -e
 
-set -euo pipefail
 export $(grep -v '^#' .env | xargs -0)
 PRJ_DIR="$(cd "$(dirname "$0")" && pwd)"
 IMAGE_NAME="$(bash "${PRJ_DIR}/get-image-name.sh")"

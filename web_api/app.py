@@ -169,10 +169,10 @@ def vram_check(background_tasks) -> Optional[JSONResponse]:
     pid = os.getpid()
     max_vram_mb = _get_max_vram_mb()
     used_mb = _query_vram_mb_for_pid(pid)
+    logger.info(f"Current PID={pid}, used_mb={used_mb}, max_vram_mb={max_vram_mb}")
     if not used_mb:
         return None
     is_vram_exceeded = used_mb > max_vram_mb
-    logger.info(f"Current PID={pid}, used_mb={used_mb}, max_vram_mb={max_vram_mb}")
     if is_vram_exceeded:
         logger.error(
             "VRAM usage exceeded limit. The process will be terminated shortly."
