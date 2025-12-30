@@ -217,12 +217,16 @@ def root():
 
 def vram_check() -> Optional[dict]:
     pid = os.getpid()
+    used_mb = _query_vram_mb_for_pid(pid)
+    logger.info(f"VRAM check (before GC): PID={pid}, used_mb={used_mb}")
+    # Step1. 初步先清理 cuda cache 與 GC
+    cleanup_cuda()
     max_vram_mb = _get_max_vram_mb()
     used_mb = _query_vram_mb_for_pid(pid)
-    logger.info(f"Current PID={pid}, used_mb={used_mb}, max_vram_mb={max_vram_mb}")
-    cleanup_cuda()
+    logger.info(f"VRAM check (after GC): PID={pid}, used_mb={used_mb}, max_vram_mb={max_vram_mb}")
     if not used_mb:
         return None
+    # Step2. 若GC後使用量仍超過max_vram_mb則KILL此Process
     is_vram_exceeded = used_mb > max_vram_mb
     if is_vram_exceeded:
         logger.error(
