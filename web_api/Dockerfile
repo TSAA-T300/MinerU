@@ -48,7 +48,7 @@ RUN /bin/bash -c "source /opt/mineru_venv/bin/activate && \
     python-multipart \
     ultralytics==8.3.39 \
     paddleocr==2.10.0 \
-    paddlepaddle==2.6.2 \
+    numpy==1.26.4 \
     struct-eqtable==0.1.0 \
     unimernet==0.1.6 \
     pypandoc==1.15 \
@@ -64,8 +64,12 @@ ARG PADDLE_MODE=cpu
 RUN if [ "${PADDLE_MODE}" = "gpu" ]; then\
       echo "Installing paddlepaddle-gpu..."; \
       . /opt/mineru_venv/bin/activate && \
-      pip install paddlepaddle-gpu==3.0.0b1 --trusted-host www.paddlepaddle.org.cn --trusted-host paddle-whl.bj.bcebos.com \
+      pip install paddlepaddle-gpu==3.2.2 --trusted-host www.paddlepaddle.org.cn --trusted-host paddle-whl.bj.bcebos.com \
         -i https://www.paddlepaddle.org.cn/packages/stable/cu118/; \
+    else \
+      echo "Installing paddlepaddle..."; \
+      . /opt/mineru_venv/bin/activate && \
+      pip install paddlepaddle==3.2.2; \
     fi
 
 RUN /bin/bash -c "source /opt/mineru_venv/bin/activate && \

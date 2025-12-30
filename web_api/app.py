@@ -1,4 +1,5 @@
 import copy
+import gc
 import json
 import os
 import shutil
@@ -8,6 +9,7 @@ import time
 from tempfile import NamedTemporaryFile
 from typing import List, Optional
 
+import torch
 import uvicorn
 from fastapi import (
     BackgroundTasks,
@@ -161,12 +163,18 @@ def _query_vram_mb_for_pid(pid: int) -> Optional[int]:
         return None
 
 
-def _terminate_after_delay(pid: int, delay_s: float = 0.5):
-    time.sleep(delay_s)
+def _terminate_after_delay(pid: int):
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         logger.warning("Process already exited before SIGTERM")
+
+
+def cleanup_cuda():
+    gc.collect()
+    logger.info("Garbage Collection completed")
+    torch.cuda.empty_cache()
+    logger.info("CUDA cache cleanup")
 
 
 def json_md_dump(
@@ -207,11 +215,12 @@ def root():
     return {"msg": "server is ready", "version": os.getenv("IMAGE_NAME", "unknown")}
 
 
-def vram_check(background_tasks) -> Optional[dict]:
+def vram_check() -> Optional[dict]:
     pid = os.getpid()
     max_vram_mb = _get_max_vram_mb()
     used_mb = _query_vram_mb_for_pid(pid)
     logger.info(f"Current PID={pid}, used_mb={used_mb}, max_vram_mb={max_vram_mb}")
+    cleanup_cuda()
     if not used_mb:
         return None
     is_vram_exceeded = used_mb > max_vram_mb
@@ -219,7 +228,7 @@ def vram_check(background_tasks) -> Optional[dict]:
         logger.error(
             "VRAM usage exceeded limit. The process will be terminated shortly."
         )
-        background_tasks.add_task(_terminate_after_delay, pid, 0.5)
+        _terminate_after_delay(pid)
     return {
         "is_vram_exceeded": is_vram_exceeded,
         "used_mb": used_mb,
@@ -352,15 +361,6 @@ async def pdf_parse_main(
     :param output_dir: Output directory for results. A folder named after the PDF file will be created to store all results
     """
     try:
-        # 確認VRAM是否足夠，如果超過限制則KILL此Process
-        vram_result = vram_check(background_tasks)
-        if vram_result and vram_result["is_vram_exceeded"]:
-            return JSONResponse(
-                content={
-                    "error": "GPU VRAM exceeded limit, Please retry later",
-                },
-                status_code=503,
-            )
         # Create a temporary file to store the uploaded PDF
         with NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
             temp_pdf.write(await pdf_file.read())
@@ -427,6 +427,7 @@ async def pdf_parse_main(
 
         if is_json_md_dump:
             json_md_dump(pipe, md_writer, pdf_name, content_list, md_content)
+
         data = {
             "layout": copy.deepcopy(pipe.model_list),
             "info": pipe.pdf_mid_data,
@@ -442,7 +443,9 @@ async def pdf_parse_main(
         # Clean up the temporary file
         if "temp_pdf_path" in locals():
             os.unlink(temp_pdf_path)
+        # 確認VRAM是否足夠，如果超過限制會在回應後KILL此服務
+        background_tasks.add_task(vram_check)
 
 
-# if __name__ == "__main__":
-#     uvicorn.run(app, host="0.0.0.0", port=8888)
+if __name__ == "__main__":
+    uvicorn.run("app:app", host="0.0.0.0", port=8000)
