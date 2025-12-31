@@ -4,13 +4,14 @@ services:
   parse-pdf-api:
       # NOTE: 目前 parse-pdf-api 的cpu/gpu模式要使用不同的docker image
       image: ${PARSE_PDF_API_IMAGE}
+      pid: "host"
       container_name: mineru_server
       ports:
         - "8888:8000"
       volumes:
         - ~/.paddleocr:/root/.paddleocr:ro
         - ~/hf/PDF-Extract-Kit/models/:/opt/models:ro
-        - ${PARSE_PDF_API_OUTPUT_DIR}:/root/output
+        - ~/plugin-data-tmp:/root/output
       entrypoint: ['/usr/bin/dumb-init', '--']
       command: >
         bash -c '

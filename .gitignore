@@ -19,7 +19,6 @@ debug/
 .history
 
 .DS_Store
-.env
 
 bad_words/
 bak/

@@ -1,11 +1,26 @@
 import copy
+import gc
 import json
 import os
+import shutil
+import signal
+import subprocess
+import time
 from tempfile import NamedTemporaryFile
 from typing import List, Optional
 
+import torch
 import uvicorn
-from fastapi import Body, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import (
+    BackgroundTasks,
+    Body,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+)
 from fastapi.responses import JSONResponse
 from loguru import logger
 from paddleocr import PaddleOCR
@@ -13,7 +28,7 @@ from paddleocr import PaddleOCR
 import magic_pdf.model as model_config
 from magic_pdf.dict2md.ocr_mkcontent import union_make
 from magic_pdf.libs.json_compressor import JsonCompressor
-from magic_pdf.libs.MakeContentConfig import DropMode, MakeMode
+from magic_pdf.libs.MakeContentConfig import MakeMode
 from magic_pdf.pipe.OCRPipe import OCRPipe
 from magic_pdf.pipe.TXTPipe import TXTPipe
 from magic_pdf.pipe.UNIPipe import UNIPipe
@@ -81,6 +96,87 @@ app = FastAPI()
 ocr_model = CustomPaddleOCR(use_angle_cls=True, lang="ch", show_log=False)
 
 
+# VRAM Check
+def _get_max_vram_mb() -> int:
+    raw = os.getenv("VRAM_MAX_MB", "10000").strip()
+    max_vram_mb = int(raw)
+    if max_vram_mb <= 0:
+        raise ValueError("VRAM_MAX_MB must be > 0")
+    return max_vram_mb
+
+
+def _query_vram_mb_for_pid_rocm(pid: int) -> Optional[int]:
+    logger.warning("rocm-smi 暫不支援，尚未啟用 AMD VRAM 判斷")
+    return None
+
+
+def _detect_gpu_device() -> str:
+    gpu_device = os.getenv("GPU_DEVICE", "").strip().lower()
+    if gpu_device in {"nvidia", "amd"}:
+        return gpu_device
+    if shutil.which("nvidia-smi"):
+        return "nvidia"
+    if shutil.which("rocm-smi"):
+        return "amd"
+    return "unknown"
+
+
+def _query_vram_mb_for_pid_nvidia(pid: int) -> Optional[int]:
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid,used_memory",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        logger.warning("nvidia-smi failed: {}", exc)
+        return None
+
+    used_mb = 0
+    for line in result.stdout.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 2:
+            continue
+        try:
+            line_pid = int(parts[0])
+            line_used = int(parts[1])
+        except ValueError:
+            continue
+        if line_pid == pid:
+            used_mb += line_used
+    return used_mb
+
+
+def _query_vram_mb_for_pid(pid: int) -> Optional[int]:
+    device = _detect_gpu_device()
+    if device == "nvidia":
+        return _query_vram_mb_for_pid_nvidia(pid)
+    elif device == "amd":
+        return _query_vram_mb_for_pid_rocm(pid)
+    else:
+        logger.warning("Unsupported GPU device or tools not found")
+        return None
+
+
+def _terminate_pid(pid: int):
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        logger.warning("Process already exited before SIGTERM")
+
+
+def cleanup_cuda():
+    gc.collect()
+    logger.info("Garbage Collection completed")
+    torch.cuda.empty_cache()
+    logger.info("CUDA cache cleanup")
+
+
 def json_md_dump(
     pipe,
     md_writer,
@@ -117,6 +213,31 @@ def root():
     回傳確認伺服器活著.
     """
     return {"msg": "server is ready", "version": os.getenv("IMAGE_NAME", "unknown")}
+
+
+def gc_and_kill_if_vram_exceeded() -> Optional[dict]:
+    pid = os.getpid()
+    used_mb = _query_vram_mb_for_pid(pid)
+    logger.info(f"VRAM check (before GC): PID={pid}, used_mb={used_mb}")
+    # Step1. 初步先清理 cuda cache 與 GC
+    cleanup_cuda()
+    max_vram_mb = _get_max_vram_mb()
+    used_mb = _query_vram_mb_for_pid(pid)
+    logger.info(f"VRAM check (after GC): PID={pid}, used_mb={used_mb}, max_vram_mb={max_vram_mb}")
+    if not used_mb:
+        return None
+    # Step2. 若GC後使用量仍超過max_vram_mb則KILL此Process
+    is_vram_exceeded = used_mb > max_vram_mb
+    if is_vram_exceeded:
+        logger.error(
+            "VRAM usage exceeded limit. The process will be terminated shortly."
+        )
+        _terminate_pid(pid)
+    return {
+        "is_vram_exceeded": is_vram_exceeded,
+        "used_mb": used_mb,
+        "max_vram_mb": max_vram_mb,
+    }
 
 
 @app.post("/ocr", tags=["projects"], summary="Do Image OCR")
@@ -187,7 +308,14 @@ async def ocr_endpoint(
 
 @app.post("/md_dump", tags=["projects"], summary="Markdown content processing")
 async def md_dump(
-    pdf_mid_info_data: dict = Body(..., description="MinerU 每一頁 pdf 的解析結果"),
+    pdf_mid_info_data: dict = Body(
+        ...,
+        description=(
+            "MinerU 每一頁 PDF 的解析結果。\n\n"
+            "格式說明請參考：\n"
+            "https://github.com/TSAA-T300/MinerU/blob/master/docs/output_file_zh_cn.md"
+        ),
+    )
     md_name: Optional[str] = Query(None, description="Markdown 檔案名稱"),
     output_path: Optional[str] = Query(
         None, description="輸出路徑，若為 None 則不輸出"
@@ -195,7 +323,8 @@ async def md_dump(
     image_path_parent: str = Query("/", description="markdown 裡的圖片路徑前綴"),
 ):
     """
-    pdf_mid_info_data 的格式詳見: https://github.com/TSAA-T300/MinerU/blob/master/docs/output_file_zh_cn.md
+    將指定的 `pdf_mid_info_data` 轉為 Markdown，
+    再根據 `md_name`、`output_path` 參數來決定是否將 Markdown 寫入硬碟。
     """
 
     def mk_markdown(
@@ -228,6 +357,7 @@ async def md_dump(
 
 @app.post("/pdf_parse", tags=["projects"], summary="Parse PDF file")
 async def pdf_parse_main(
+    background_tasks: BackgroundTasks,
     pdf_file: UploadFile = File(...),
     parse_method: str = "auto",
     model_json_path: str = None,
@@ -235,12 +365,44 @@ async def pdf_parse_main(
     output_dir: str = "output",
 ):
     """
-    Execute the process of converting PDF to JSON and MD, outputting MD and JSON files to the specified directory
-    :param pdf_file: The PDF file to be parsed
-    :param parse_method: Parsing method, can be auto, ocr, or txt. Default is auto. If results are not satisfactory, try ocr
-    :param model_json_path: Path to existing model data file. If empty, use built-in model. PDF and model_json must correspond
-    :param is_json_md_dump: Whether to write parsed data to .json and .md files. Default is True. Different stages of data will be written to different .json files (3 in total), md content will be saved to .md file
-    :param output_dir: Output directory for results. A folder named after the PDF file will be created to store all results
+    解析上傳的 PDF 檔案，並轉換為結構化的 JSON 與 Markdown 格式輸出。
+
+    此 API 會接收一個 PDF 檔案，依指定或自動判斷的解析方式
+    （文字解析或 OCR），產生多階段的結構化資料與最終解析內容。
+    解析結果可選擇是否寫入檔案系統。
+
+    ### 參數說明
+
+    - **pdf_file** (`UploadFile`)
+      欲解析的 PDF 檔案。
+
+    - **parse_method** (`str`, optional)
+      PDF 解析方式，可選值：
+        - `auto`：自動判斷使用文字解析或 OCR（預設）
+        - `ocr`：強制使用 OCR 解析
+        - `txt`：強制使用文字解析
+      若解析結果不理想，建議改用 `ocr`。
+
+    - **model_json_path** (`str`, optional)
+      模型資料的路徑。若未提供，將使用系統內建模型。
+      請確保該模型檔與輸入的 PDF 相互對應。
+
+    - **is_json_md_dump** (`bool`, optional)
+      是否將解析結果寫入檔案系統。
+      若為 `True`，會輸出多個中間階段的 JSON 檔（最多 3 個），
+      並產生最終的 Markdown（`.md`）檔案。
+      預設為 `True`。
+
+    - **output_dir** (`str`, optional)
+      解析結果的輸出目錄。
+      系統會在此目錄下建立一個以 PDF 檔名命名的子資料夾，
+      用以存放所有輸出結果。
+      預設為 `"output"`。
+
+    ### 注意事項
+
+    - 系統會於解析後監控 VRAM 使用量，並於超出限制時刪除Process，需靠外部(如：docker-compose)重啟服務。
+    
     """
     try:
         # Create a temporary file to store the uploaded PDF
@@ -309,6 +471,7 @@ async def pdf_parse_main(
 
         if is_json_md_dump:
             json_md_dump(pipe, md_writer, pdf_name, content_list, md_content)
+
         data = {
             "layout": copy.deepcopy(pipe.model_list),
             "info": pipe.pdf_mid_data,
@@ -324,7 +487,9 @@ async def pdf_parse_main(
         # Clean up the temporary file
         if "temp_pdf_path" in locals():
             os.unlink(temp_pdf_path)
+        # 執行後，主動做GC釋放資源，再確認VRAM用量是否仍小於門檻值，如果超過門檻會在回應後KILL此服務(需由外層來協助重啟，如：docker-compose)
+        background_tasks.add_task(gc_and_kill_if_vram_exceeded)
 
 
-# if __name__ == '__main__':
-#     uvicorn.run(app, host="0.0.0.0", port=8888)
+if __name__ == "__main__":
+    uvicorn.run("app:app", host="0.0.0.0", port=8000)
