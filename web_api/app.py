@@ -163,7 +163,7 @@ def _query_vram_mb_for_pid(pid: int) -> Optional[int]:
         return None
 
 
-def _terminate_after_delay(pid: int):
+def _terminate_pid(pid: int):
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -215,7 +215,7 @@ def root():
     return {"msg": "server is ready", "version": os.getenv("IMAGE_NAME", "unknown")}
 
 
-def vram_check() -> Optional[dict]:
+def gc_and_kill_if_vram_exceeded() -> Optional[dict]:
     pid = os.getpid()
     used_mb = _query_vram_mb_for_pid(pid)
     logger.info(f"VRAM check (before GC): PID={pid}, used_mb={used_mb}")
@@ -232,7 +232,7 @@ def vram_check() -> Optional[dict]:
         logger.error(
             "VRAM usage exceeded limit. The process will be terminated shortly."
         )
-        _terminate_after_delay(pid)
+        _terminate_pid(pid)
     return {
         "is_vram_exceeded": is_vram_exceeded,
         "used_mb": used_mb,
@@ -308,7 +308,14 @@ async def ocr_endpoint(
 
 @app.post("/md_dump", tags=["projects"], summary="Markdown content processing")
 async def md_dump(
-    pdf_mid_info_data: dict = Body(..., description="MinerU 每一頁 pdf 的解析結果"),
+    pdf_mid_info_data: dict = Body(
+        ...,
+        description=(
+            "MinerU 每一頁 PDF 的解析結果。\n\n"
+            "格式說明請參考：\n"
+            "https://github.com/TSAA-T300/MinerU/blob/master/docs/output_file_zh_cn.md"
+        ),
+    )
     md_name: Optional[str] = Query(None, description="Markdown 檔案名稱"),
     output_path: Optional[str] = Query(
         None, description="輸出路徑，若為 None 則不輸出"
@@ -316,7 +323,8 @@ async def md_dump(
     image_path_parent: str = Query("/", description="markdown 裡的圖片路徑前綴"),
 ):
     """
-    pdf_mid_info_data 的格式詳見: https://github.com/TSAA-T300/MinerU/blob/master/docs/output_file_zh_cn.md
+    將指定的 `pdf_mid_info_data` 轉為 Markdown，
+    再根據 `md_name`、`output_path` 參數來決定是否將 Markdown 寫入硬碟。
     """
 
     def mk_markdown(
@@ -357,12 +365,44 @@ async def pdf_parse_main(
     output_dir: str = "output",
 ):
     """
-    Execute the process of converting PDF to JSON and MD, outputting MD and JSON files to the specified directory
-    :param pdf_file: The PDF file to be parsed
-    :param parse_method: Parsing method, can be auto, ocr, or txt. Default is auto. If results are not satisfactory, try ocr
-    :param model_json_path: Path to existing model data file. If empty, use built-in model. PDF and model_json must correspond
-    :param is_json_md_dump: Whether to write parsed data to .json and .md files. Default is True. Different stages of data will be written to different .json files (3 in total), md content will be saved to .md file
-    :param output_dir: Output directory for results. A folder named after the PDF file will be created to store all results
+    解析上傳的 PDF 檔案，並轉換為結構化的 JSON 與 Markdown 格式輸出。
+
+    此 API 會接收一個 PDF 檔案，依指定或自動判斷的解析方式
+    （文字解析或 OCR），產生多階段的結構化資料與最終解析內容。
+    解析結果可選擇是否寫入檔案系統。
+
+    ### 參數說明
+
+    - **pdf_file** (`UploadFile`)
+      欲解析的 PDF 檔案。
+
+    - **parse_method** (`str`, optional)
+      PDF 解析方式，可選值：
+        - `auto`：自動判斷使用文字解析或 OCR（預設）
+        - `ocr`：強制使用 OCR 解析
+        - `txt`：強制使用文字解析
+      若解析結果不理想，建議改用 `ocr`。
+
+    - **model_json_path** (`str`, optional)
+      模型資料的路徑。若未提供，將使用系統內建模型。
+      請確保該模型檔與輸入的 PDF 相互對應。
+
+    - **is_json_md_dump** (`bool`, optional)
+      是否將解析結果寫入檔案系統。
+      若為 `True`，會輸出多個中間階段的 JSON 檔（最多 3 個），
+      並產生最終的 Markdown（`.md`）檔案。
+      預設為 `True`。
+
+    - **output_dir** (`str`, optional)
+      解析結果的輸出目錄。
+      系統會在此目錄下建立一個以 PDF 檔名命名的子資料夾，
+      用以存放所有輸出結果。
+      預設為 `"output"`。
+
+    ### 注意事項
+
+    - 系統會於解析後監控 VRAM 使用量，並於超出限制時刪除Process，需靠外部(如：docker-compose)重啟服務。
+    
     """
     try:
         # Create a temporary file to store the uploaded PDF
@@ -447,8 +487,8 @@ async def pdf_parse_main(
         # Clean up the temporary file
         if "temp_pdf_path" in locals():
             os.unlink(temp_pdf_path)
-        # 確認VRAM是否足夠，如果超過限制會在回應後KILL此服務
-        background_tasks.add_task(vram_check)
+        # 執行後，主動做GC釋放資源，再確認VRAM用量是否仍小於門檻值，如果超過門檻會在回應後KILL此服務(需由外層來協助重啟，如：docker-compose)
+        background_tasks.add_task(gc_and_kill_if_vram_exceeded)
 
 
 if __name__ == "__main__":
