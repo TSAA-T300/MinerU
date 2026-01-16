@@ -314,8 +314,8 @@ async def md_dump(
             "MinerU 每一頁 PDF 的解析結果。\n\n"
             "格式說明請參考：\n"
             "https://github.com/TSAA-T300/MinerU/blob/master/docs/output_file_zh_cn.md"
-        ),
-    )
+        )
+    ),
     md_name: Optional[str] = Query(None, description="Markdown 檔案名稱"),
     output_path: Optional[str] = Query(
         None, description="輸出路徑，若為 None 則不輸出"
